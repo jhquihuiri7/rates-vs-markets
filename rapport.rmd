@@ -1,0 +1,609 @@
+---
+title: "L’impact des taux d’intérêt sur les marchés boursiers développés : rôle et enjeux de l’endogénéité"
+author: "Bastien"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+    theme: flatly
+    df_print: paged
+---
+## Présentation de la question de recherche
+
+1. **Contexte et justification**
+
+Au cours des dernières décennies, la relation entre les taux d’intérêt et l’évolution des marchés boursiers s’est érigée en l’un des axes centraux de l’analyse financière et de la politique monétaire. Les taux d’intérêt fixés par les banques centrales déterminent le coût de l’argent pour les entreprises et les ménages, influencent l’évaluation des flux de trésorerie futurs et conditionnent l’allocation des portefeuilles entre revenu fixe et revenu variable. Dans un contexte de mondialisation et de flux de capitaux de plus en plus rapides, comprendre jusqu’à quel point les variations des taux d’intérêt affectent la rentabilité et la volatilité des bourses est indispensable tant pour les décideurs de politiques économiques que pour les gestionnaires d’actifs et les investisseurs particuliers.
+
+La littérature empirique sur ce lien a majoritairement mis en évidence une relation inverse : lorsque les taux d’intérêt augmentent, le coût de l’endettement s’alourdit et les modèles d’actualisation des dividendes et des bénéfices futurs pèsent à la baisse sur les prix des actions ; à l’inverse, une baisse des taux tend à stimuler la liquidité et les anticipations de croissance, favorisant les tendances haussières. Toutefois, les études de panel multinational révèlent une hétérogénéité selon les pays et les horizons temporels, et les analyses en séries temporelles isolées montrent parfois des corrélations faibles, voire positives, en période d’expansion créditrice soutenue.
+
+Un aspect critique encore peu exploré est celui de **l’endogénéité** : les taux d’intérêt et les prix des actions peuvent être simultanément influencés par des chocs macroéconomiques communs, par les réactions ex ante des banques centrales aux mouvements boursiers, ou par l’effet richesse qu’un marché haussier exerce sur l’inflation et, par ricochet, sur la politique monétaire. Ignorer cette simultanéité risque d’attribuer aux taux d’intérêt un rôle causal unique, alors que la relation est bidirectionnelle et médiée par des variables non observées (attentes d’inflation, conditions de liquidité mondiale, chocs de confiance…).
+
+2. **Problématique de recherche**
+
+> **Les taux d’intérêt influencent-ils la performance des marchés boursiers dans les pays développés, et quel est le rôle de l’endogénéité ?**
+
+## Présentation des données {.tabset}
+### Définitions
+
+- **Date**  
+  Période au format année‑mois (`YYYY‑MM`).  
+  _Importance :_ Permet d’aligner temporellement les rendements boursiers et les taux directeurs pour l’analyse des séries chronologiques et des modèles en panel.
+
+- **Code_Pays**  
+  Code court du pays ou de la zone (`EA`, `HK`, `JP`, etc.).  
+  _Importance :_ Clé pour fusionner les différentes sources (Yahoo Finance, FRED, Eurostat…) et pour filtrer ou regrouper les résultats de manière cohérente.
+
+- **Pays**  
+  Nom complet du marché (`Germany`, `France`, `Hong Kong`, `Japan`, …).  
+  _Importance :_ Facilite l’interprétation des résultats et la création de graphiques avec des libellés clairs.
+
+- **Indice_Bourcier**  
+  Nom de l’indice boursier de référence (`DAX`, `CAC 40`, `Hang Seng`, `Nikkei 225`, …).  
+  _Importance :_ Sert de proxy pour la performance agrégée du marché local, et constitue la variable dépendante de l’étude.
+
+- **Profit**  
+  Rendement logarithmique mensuel de l’indice :  
+
+- **Taux_Directeur**
+  Taux d’intérêt officiel (%) fixé par la banque centrale à la fin de chaque mois.
+  _Importance : Variable explicative principale : reflète la politique monétaire dont on cherche à estimer l’effet (positif ou négatif) sur le Profit.
+
+### Données
+```{r setup, include=FALSE, message = FALSE, warning = FALSE, echo = FALSE}
+library(quantmod)
+library(dplyr)
+library(ggplot2)
+library(eurostat)
+library(knitr)
+library(plm)
+library(lmtest)
+library(ivreg)
+library(AER)
+library(modelsummary)
+library(tidyr)
+library(gridExtra)
+```
+
+```{r, include=FALSE, message = FALSE, warning = FALSE, echo = FALSE}
+indices_yahoo <- list(
+  "^GSPC" = list(pays = "United States", pays_code = "US", indice = "S&P 500"),
+  "^IXIC" = list(pays = "United States", pays_code = "US", indice = "NASDAQ"),
+  "^DJI"  = list(pays = "United States", pays_code = "US", indice = "Dow Jones"),
+  "^FTSE" = list(pays = "United Kingdom", pays_code = "UK", indice = "FTSE 100"),
+  "^GDAXI"= list(pays = "Germany", pays_code = "EA", indice = "DAX"),
+  "^FCHI" = list(pays = "France", pays_code = "EA", indice = "CAC 40"),
+  "^N225" = list(pays = "Japan", pays_code = "JP", indice = "Nikkei 225"),
+  "^HSI"  = list(pays = "Hong Kong", pays_code = "HK", indice = "Hang Seng"),
+  "^STOXX50E" = list(pays = "Eurozone", pays_code = "EA", indice = "Euro Stoxx 50")
+)
+
+
+indices_data <- data.frame(
+  date = as.Date(character()),        
+  returns = numeric(0),      
+  pays = character(0), 
+  pays_code = character(0),                
+  indice = character(0)               
+)
+
+for (code in names(indices_yahoo)) {
+  getSymbols(code, src = "yahoo", from = "2000-01-01", auto.assign = TRUE)
+  rendement_mensuel <- monthlyReturn(get(substring(code, 2)), type = "log")
+
+  df <- data.frame(
+    date = index(rendement_mensuel),
+    returns = as.numeric(rendement_mensuel),
+    pays = indices_yahoo[[code]]$pays,
+    pays_code = indices_yahoo[[code]]$pays_code,
+    indice = indices_yahoo[[code]]$indice
+  )
+  indices_data <- rbind(indices_data, df)
+}
+
+tasas_directoras <- list(
+  "FEDFUNDS"         = list(pays_code = "US", nombre = "Federal Funds Rate"),
+  "IR3TIB01GBM156N"  = list(pays_code = "UK",    nombre = "Bank Rate"),
+  "IR3TIB01JPM156N"  = list(pays_code = "JP",          nombre = "Interest Rate")
+)
+
+taux_data <- data.frame(
+  date = as.Date(character()),       
+  taux = numeric(0),             
+  pays_code = character(0)                 
+)
+
+for (code in names(tasas_directoras)) {
+  getSymbols(code, src = "FRED", from = "2000-01-01", auto.assign = TRUE)
+  serie <- get(code)
+
+  df <- data.frame(
+    date = index(serie),
+    taux = coredata(serie)[,1],
+    pays_code = tasas_directoras[[code]]$pays_code
+  )
+  taux_data <- rbind(taux_data, df)
+}
+
+indices_data$year_month <- format(indices_data$date, "%Y-%m")
+taux_data$year_month <- format(taux_data$date, "%Y-%m")
+indices_data$date <- NULL
+taux_data$date <- NULL
+data <- merge(indices_data, taux_data, by = c("year_month", "pays_code"), all.x = TRUE)
+
+tasa_data <- get_eurostat("irt_st_m", time_format = "date", select_time="M", filters = list(sinceTimePeriod = "2000-01"))
+mapeo_paises <- list(
+  "Germany" = "DE",
+  "France" = "FR",
+  "Japan" = "JP",
+  "Hong Kong" = "HK",
+  "Eurozone" = "EA"  
+)
+codigos_paises <- as.vector(unlist(mapeo_paises))
+tasa_data <- tasa_data %>%
+  filter(
+    geo %in% codigos_paises,      
+    int_rt == "IRT_DTD",          
+    values != "Invalid Number"    
+  ) %>%
+  rename(pays_code = geo)
+
+tasa_data$year_month <- format(tasa_data$time, "%Y-%m")
+tasa_data$time <- NULL
+tasa_data$freq <- NULL
+tasa_data$int_rt <- NULL
+data <- merge(data, tasa_data, by = c("year_month", "pays_code"), all.x = TRUE)
+data <- data %>%
+  mutate(taux = ifelse(is.na(taux) & !is.na(values), values, taux))
+data$values <- NULL
+
+hk_rates <- read.csv("hong_kong.csv")
+hk_rates$date <- as.Date(hk_rates$date)
+hk_rates$pays_code <- "HK"
+hk_rates$year_month <- format(hk_rates$date, "%Y-%m")
+hk_rates$date <- NULL
+data <- merge(data, hk_rates, by = c("year_month", "pays_code"), all.x = TRUE)
+data <- data %>%
+  mutate(taux = if_else(!is.na(taux_h), taux_h, taux))
+data$taux_h <- NULL
+data$taux <- as.numeric(data$taux)
+
+data <- data %>%
+  rename(
+    Date = year_month,
+    Code_Pays = pays_code,
+    Profit = returns,
+    Pays = pays,
+    Indice_Bourcier = indice,
+    Taux_Directeur = taux
+  ) %>%
+  select(Date, Code_Pays, Pays, Indice_Bourcier, Profit, Taux_Directeur)
+```
+```{r, echo=FALSE}
+knitr::kable(data)
+```
+
+## Statistiques descriptives {.tabset}
+### Résumé statistique
+```{r, message = FALSE, warning = FALSE, echo=FALSE}
+summary_stats <- summary(data[, c("Profit", "Taux_Directeur")])
+kable(summary_stats, format = "markdown")
+
+plot_profit <- ggplot(data, aes(x = Profit, y = factor("Profit"))) +
+  geom_boxplot(fill = "#69b3a2") +
+  labs(title = "Boxplot de Profit", x = "Profit", y = "") +
+  theme_minimal() +
+  stat_summary(
+    fun = mean,
+    geom = "text",
+    aes(label = paste0("Moyenne: ",round(after_stat(x), 4))),
+    vjust = -6.5, color = "black"
+  ) +
+  stat_summary(
+    fun = median,
+    geom = "text",
+    aes(label = paste0("Médiane: ",round(after_stat(x), 4))),
+    vjust = 7, color = "black"
+  )+
+  stat_summary(
+    fun = function(x) quantile(x, 0.25),
+    geom = "text",
+    aes(label = paste0("Q1: ",round(after_stat(x), 4))),
+    vjust = -5, color = "black"
+  ) +
+  stat_summary(
+    fun = function(x) quantile(x, 0.75),
+    geom = "text",
+    aes(label = paste0("Q3: ",round(after_stat(x), 4))),
+    vjust = 6, color = "black"
+  )
+
+plot_taux <- ggplot(data, aes(x = Taux_Directeur, y = factor("Taux"))) +
+  geom_boxplot(fill = "#404080") +
+  labs(title = "Boxplot de Taux Directeur", x = "Taux Directeur", y = "") +
+  theme_minimal()+
+  stat_summary(
+    fun = mean,
+    geom = "text",
+    aes(label = paste0("Moyenne: ",round(after_stat(x), 4))),
+    vjust = -7, color = "black"
+  ) +
+  stat_summary(
+    fun = median,
+    geom = "text",
+    aes(label = paste0("Médiane: ",round(after_stat(x), 4))),
+    vjust = 7, color = "black"
+  )+
+  stat_summary(
+    fun = function(x) quantile(x, 0.25),
+    geom = "text",
+    aes(label = paste0("Q1: ",round(after_stat(x), 4))),
+    vjust = -5, color = "black"
+  ) +
+  stat_summary(
+    fun = function(x) quantile(x, 0.75),
+    geom = "text",
+    aes(label = paste0("Q3: ",round(after_stat(x), 4))),
+    vjust = 6, color = "black"
+  )
+
+grid.arrange(plot_profit, plot_taux, ncol = 1)
+```
+
+### Analyse par pays
+
+```{r, message = FALSE, warning = FALSE, echo=FALSE}
+summary_stats <- data %>%
+  group_by(Pays) %>%
+  summarise(
+    Avg_Profit = mean(Profit, na.rm = TRUE),
+    Avg_Taux = mean(Taux_Directeur, na.rm = TRUE),
+    Correlation = cor(Profit, Taux_Directeur, use = "complete.obs")
+  )
+
+kable(summary_stats, format = "markdown")
+# 1. Gráfico para Avg_Profit
+heat1 <- summary_stats %>%
+  select(Pays, Valor = Avg_Profit) %>%
+  ggplot(aes(x = "", y = Pays, fill = Valor)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#d73027", mid = "white", high = "#1a9850", midpoint = 0) +
+  labs(title = "Avg Profit", x = "", y = "") +
+  theme_minimal()
+
+# 2. Gráfico para Avg_Taux
+heat2 <- summary_stats %>%
+  select(Pays, Valor = Avg_Taux) %>%
+  ggplot(aes(x = "", y = Pays, fill = Valor)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#d73027", mid = "white", high = "#1a9850", midpoint = median(summary_stats$Avg_Taux)) +
+  labs(title = "Avg Taux Directeur", x = "", y = "") +
+  theme_minimal()
+
+# 3. Gráfico para Correlation
+heat3 <- summary_stats %>%
+  select(Pays, Valor = Correlation) %>%
+  ggplot(aes(x = "", y = Pays, fill = Valor)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#d73027", mid = "white", high = "#1a9850", midpoint = 0) +
+  labs(title = "Correlation", x = "", y = "") +
+  theme_minimal()
+
+# 4. Combinar con gridExtra (uno encima del otro)
+gridExtra::grid.arrange(heat1, heat2, heat3, ncol = 3)
+```
+
+### Corrélation globale et par pays
+
+**Corrélation globale entre le profit et le taux directeur**
+```{r, message = FALSE, warning = FALSE, echo=FALSE}
+correlacion <- cor(data$Profit, data$Taux_Directeur, use = "complete.obs")
+
+tabla_cor <- data.frame(
+  Variable_1 = "Profit",
+  Variable_2 = "Taux_Directeur",
+  Correlation = round(correlacion, 4)
+)
+knitr::kable(tabla_cor)
+
+# Crear gráfico de dispersión con línea de tendencia
+ggplot(data, aes(x = Taux_Directeur, y = Profit)) +
+  geom_point(alpha = 0.6, color = "#2c7fb8") +
+  geom_smooth(method = "lm", se = TRUE, color = "#d73027") +
+  labs(
+    title = "Dispersión entre Taux Directeur y Profit",
+    x = "Taux Directeur",
+    y = "Profit"
+  ) +
+  annotate(
+    "text",
+    x = max(data$Taux_Directeur, na.rm = TRUE),
+    y = min(data$Profit, na.rm = TRUE),
+    label = paste("Correlación:", round(cor(data$Profit, data$Taux_Directeur, use = "complete.obs"), 4)),
+    hjust = 1,
+    vjust = 0,
+    size = 4,
+    color = "black"
+  ) +
+  theme_minimal()
+```
+
+**Corrélation par pays entre le profit et le taux directeur**
+```{r, echo=FALSE}
+summary_stats <- data %>% 
+  group_by(Pays) %>%
+  summarise(Correlation = cor(Profit, Taux_Directeur, use = "complete.obs")) %>%
+  arrange(desc(Correlation))
+
+kable(summary_stats)
+```
+1. **Diagrammes de dispersion avec lignes de régression**
+```{r, message = FALSE, warning = FALSE, echo = FALSE}
+ggplot(data, aes(x = Taux_Directeur, y = Profit, color = Pays)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Relation entre les taux d’intérêt et le rendement boursier")
+```
+2. **Séries temporelles (s'il y a des données historiques)**
+```{r, message = FALSE, warning = FALSE, echo = FALSE}
+data$Date <- as.Date(paste0(data$Date, "-01"), format = "%Y-%m-%d")
+
+ggplot(data, aes(x = Date)) +
+  geom_line(aes(y = Profit, color = "Profit")) +
+  geom_line(aes(y = Taux_Directeur, color = "Taux_Directeur")) +
+  facet_wrap(~Pays, scales = "free_y") +
+  labs(title = "Évolution temporelle du profit et du taux directeur")
+```
+
+## Présentation de différentes spécifications possibles {.tabset}
+### Modèles disponibles
+Pour analyser la relation entre les taux d'intérêt (Taux_Directeur) et le rendement boursier (Profit), et pour traiter l'endogénéité, plusieurs spécifications économétriques peuvent être envisagées. Voici une proposition structurée :
+
+1. **Modèle de base des moindres carrés ordinaires (Pooled OLS)**  
+**Équation** :  
+$$
+\text{Profit}_{it} = \beta_0 + \beta_1 \text{Taux\_Directeur}_{it} + \epsilon_{it}
+$$  
+**Objectif** : Estimer la relation linéaire simple entre les variables.  
+**Limite** : Ignore les effets non observés et l’endogénéité.  
+
+2. **Modèle à effets fixes (FE)**  
+**Équation** :  
+$$
+\text{Profit}_{it} = \beta_0 + \beta_1 \text{Taux\_Directeur}_{it} + \alpha_i + \epsilon_{it}
+$$  
+- $\alpha_i$ : Effets fixes par pays (contrôle l’hétérogénéité non observée, comme les politiques nationales).  
+**Objectif** : Isoler l’effet des taux d’intérêt au sein de chaque pays.  
+
+3. **Modèle à effets aléatoires (RE)**  
+**Équation** :  
+$$
+\text{Profit}_{it} = \beta_0 + \beta_1 \text{Taux\_Directeur}_{it} + u_i + \epsilon_{it}
+$$  
+- $u_i$ : Effets aléatoires par pays (suppose **aucune corrélation** avec les variables explicatives).  
+**Objectif** : Combiner l’information *entre les pays* et *au sein des pays*.  
+
+4. **Modèle avec variables instrumentales (IV)**    
+**Équation** :  
+$$
+\text{Profit}_{it} = \beta_0 + \beta_1 \widehat{\text{Taux\_Directeur}}_{it} + \epsilon_{it}
+$$  
+
+**Objectif** : Corriger l’endogénéité (ex. : simultanéité ou variables omises).  
+
+**Instruments possibles** :  
+- Retards des taux d’intérêt (ex. : $\text{Taux\_Directeur}_{i,t-1}$).  
+- Variables externes (inflation mondiale, taux de la FED).  
+
+5. **Modèle de panel dynamique (GMM)**     
+**Équation** :  
+$$
+\text{Profit}_{it} = \beta_0 + \beta_1 \text{Taux\_Directeur}_{it} + \gamma \text{Profit}_{i,t-1} + \epsilon_{it}
+$$  
+
+**Méthode** : Estimateur Arellano-Bond (GMM en différences).  
+**Objectif** : Contrôler l’endogénéité et les effets dynamiques (ex. : le rendement passé influence l’actuel).  
+
+6. **Modèle VAR (Vecteurs autorégressifs)**  
+**Équation** :  
+$$
+\begin{cases}
+\text{Profit}_t = \alpha_1 + \beta_1 \text{Profit}_{t-1} + \gamma_1 \text{Taux}_{t-1} + \epsilon_{1t} \\
+\text{Taux}_t = \alpha_2 + \beta_2 \text{Profit}_{t-1} + \gamma_2 \text{Taux}_{t-1} + \epsilon_{2t}
+\end{cases}
+$$  
+
+**Objectif** : Analyser la causalité bidirectionnelle et les effets temporels entre les variables.  
+
+7. **Spécification avec effets non linéaires**    
+**Équation** :  
+$$
+\text{Profit}_{it} = \beta_0 + \beta_1 \text{Taux}_{it} \cdot I(\text{Taux}_{it} > \bar{\text{Taux}}) + \epsilon_{it}
+$$  
+- $\bar{\text{Taux}}$ : Moyenne de l’échantillon du taux d’intérêt.  
+- $I(\cdot)$ : Fonction indicatrice (1 si $\text{Taux}_{it} > \bar{\text{Taux}}$, 0 sinon).  
+
+**Objectif** : Capturer des effets seuils ou asymétriques (ex. : impact différentiel des taux élevés vs. faibles).
+
+## Choix du modèle {.tabset}
+### Comparaison des Modèles Économétriques
+``` {r, message = FALSE, warning = FALSE, echo = FALSE}
+tabla <- data.frame(
+  Modèle = c(
+    "Pooled OLS",
+    "Effets Fixes",
+    "Effets Aléatoires",
+    "IV",
+    "GMM",
+    "VAR",
+    "Non Linéaire"
+  ),
+  Limitations = c(
+    "❗ Ignore l'endogénéité et les effets non observés.",
+    "❗ Ne contrôle pas les variables qui varient dans le temps. Supprime les effets invariants.",
+    "❗ Suppose que les effets aléatoires ne sont pas corrélés aux régresseurs.",
+    "❗ Nécessite des instruments forts et valides (peut être subjectif).",
+    "❗ Complexité technique. Sensible au choix des instruments.",
+    "❗ N'établit pas de causalité structurelle, seulement une corrélation temporelle.",
+    "❗ Les seuils peuvent être arbitraires (ex : moyenne vs. percentiles)."
+  ),
+  Recommandation = c(
+    "Utile seulement comme référence de base. Non recommandé pour une analyse causale.",
+    "Idéal si vous souhaitez isoler les effets *au sein des pays*.",
+    "À utiliser uniquement si le test de Hausman confirme l'absence de corrélation (p > 0,05).",
+    "**Recommandé** en cas d'endogénéité. Valider avec Sargan/Hansen.",
+    "**Optimal** pour les dynamiques et l'endogénéité (ex : performance passée).",
+    "Idéal pour explorer la *causalité bidirectionnelle* (Granger).",
+    "Utile si vous suspectez des effets asymétriques (taux élevés vs. faibles)."
+  )
+)
+kable(tabla, format = "markdown")
+```
+
+### Justification
+1. **Considérations Clés**
+
+**Endogénéité :**
+
+- Utiliser **IV** ou **GMM** s'il existe une corrélation entre *Taux_Directeur* et ϵᵢₜ.  
+- Valider les instruments avec les tests de **Sargan/Hansen**.
+
+**Robustesse :**
+
+- Comparer les résultats entre les différentes spécifications (**FE**, **RE**, **IV**, **GMM**).  
+- Inclure des variables de contrôle (ex : PIB, inflation).
+
+**Interprétation :**
+
+- Des coefficients **significatifs et négatifs** sur **β₁** suggèrent que des taux d'intérêt élevés réduisent la rentabilité.
+
+2. **Modèles choisis et justification**
+
+Les modèles à variables instrumentales (VI) et le GMM pour panels dynamiques sont les plus appropriés. Le modèle VI permet de résoudre les problèmes d’endogénéité (par exemple, la causalité inverse entre les taux d’intérêt et les marchés boursiers) grâce à l’utilisation d’instruments externes valides (comme les politiques monétaires mondiales). Le GMM, quant à lui, utilise les retards des variables comme instruments internes, ce qui est idéal si la relation étudiée est dynamique (par exemple, la performance boursière passée influence la performance actuelle).
+
+Ces deux approches permettent d’éviter les biais des modèles traditionnels (comme les MCO ou les effets fixes) qui ignorent la corrélation entre les variables explicatives et les erreurs, ce qui est essentiel pour une analyse causale rigoureuse dans le cadre de cette recherche.
+
+> Dans cette recherche, deux modèles économétriques distincts ont été utilisés : le modèle à variables instrumentales (VI) et le modèle GMM pour panels dynamiques. Il ne s’agit pas d’un simple changement d’approche, mais d’un choix motivé par la nécessité de croiser les résultats et de renforcer la robustesse de l’analyse, en particulier dans un contexte où tous les instruments externes valides requis ne sont pas disponibles pour appliquer en toute confiance une seule méthode.
+
+> Il ne s’agit donc pas d’un remplacement d’un modèle par un autre, mais d’une stratégie complémentaire. L’utilisation des deux approches vise à vérifier la cohérence des résultats sous différents postulats, ce qui est essentiel dans les études où la disponibilité et la validité des instruments peuvent être limitées ou incertaines.
+
+## Endogénéité dans le modèle {.tabset}
+
+### Résultats
+```{r, include=FALSE, message = FALSE, warning = FALSE, echo = FALSE}
+df_panel <- data %>%
+  mutate(Code_Pays = paste0(Code_Pays, "_", Indice_Bourcier)) 
+df_panel <- df_panel[df_panel$Pays != "Hong Kong", ]
+df_panel <- df_panel %>%
+  distinct(Code_Pays, Date, .keep_all = TRUE)
+df_panel <- df_panel %>%
+  arrange(Code_Pays, Date) %>%
+  pdata.frame(index = c("Code_Pays", "Date"))
+df_panel <- pdata.frame(df_panel, index = c("Code_Pays", "Date"))
+df_panel$Taux_Directeur[is.na(df_panel$Taux_Directeur)] <- mean(df_panel$Taux_Directeur, na.rm = TRUE)
+df_panel$Taux_Directeur_lag <- plm::lag(df_panel$Taux_Directeur, 2)
+df_panel$Taux_Directeur_mean <- ave(df_panel$Taux_Directeur, df_panel$Code_Pays, FUN = mean)
+df_panel <- na.omit(df_panel[, c("Profit", "Taux_Directeur", "Taux_Directeur_lag", "Code_Pays")])
+```
+
+
+1. **Modèle à variables instrumentales (IV)**  
+```{r, message = FALSE, warning = FALSE, echo = FALSE}
+model_iv <- ivreg(Profit ~ Taux_Directeur | Taux_Directeur_lag, data = df_panel)
+summary_stats <- summary(model_iv, diagnostics = TRUE)
+coefficients <- summary_stats$coefficients
+diagnostics <- summary_stats$diagnostics
+kable(coefficients, format = "markdown", caption = "Coefficients du Modèle IV")
+kable(diagnostics, format = "markdown", caption = "Tests de Diagnostic")
+
+df_panel$prediction_iv <- fitted(model_iv)  # Predicciones del modelo IV
+plot_1 <- ggplot(df_panel, aes(x = Taux_Directeur, y = Profit)) +
+  geom_point(alpha = 0.3) +
+  geom_line(aes(y = prediction_iv), color = "blue", linewidth = 1) +
+  labs(title = "Relation ajustée (Modèle IV)",
+       x = "Taux_Directeur", y = "Variable Dépendante (Profit)") +
+  theme_minimal()
+
+residus_iv <- residuals(model_iv)
+plot_2 <- ggplot(data.frame(Residus = residus_iv), aes(x = seq_along(Residus), y = Residus)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Résidus du Modèle IV", 
+       x = "Observation", 
+       y = "Résidus") +
+  theme_minimal()
+
+grid.arrange(plot_1, plot_2, ncol = 2)
+```
+
+Les résultats montrent une relation négative et statistiquement significative entre le taux directeur (Taux_Directeur) et les rendements.
+
+- Pour chaque augmentation d’une unité du taux, la variable dépendante diminue de 0.0026 unités,
+un effet faible mais hautement significatif (p-value = 5.2e-06).
+- L’interception est de 0.0065 et est également statistiquement significative,
+ce qui indique que, lorsque le taux est nul, la valeur attendue de la variable dépendante est positive.
+- La solidité de cette relation est confirmée par des valeurs t élevées (|t| > 4.5),
+ce qui exclut l’hypothèse d’un effet dû au hasard.
+
+2. **Modèle GMM (méthode des moments généralisés)**
+```{r, message = FALSE, warning = FALSE, echo = FALSE}
+model_gmm <- pgmm(
+  Profit ~ lag(Profit, 1) + Taux_Directeur | lag(Profit, 2:3), 
+  data = df_panel,
+  effect = "individual", 
+  model = "twosteps", 
+  transformation = "ld"
+)
+summary_stats <- summary(model_gmm)
+coefficients <- summary_stats$coefficients
+kable(coefficients, format = "markdown", caption = "Coefficients du Modèle GMM")
+```
+
+- Le modèle GMM ne révèle pas de relations significatives entre les variables indépendantes et les rendements. Le retard des bénéfices (`lag(Profit, 1)`) affiche un coefficient de -0.184 avec une *p-value* de 0.583, tandis que le taux directeur (`Taux_Directeur`) a un faible coefficient de -0.0007 et une *p-value* de 0.299.
+
+- Les écarts-types élevés, comme 0.336 pour le retard des bénéfices, suggèrent une forte imprécision dans les estimations. Cela pourrait provenir d’instruments faibles, de multicolinéarité ou d’un échantillon restreint, compromettant la fiabilité des résultats.
+
+- En conclusion, aucun effet significatif n’est identifié. Il est donc nécessaire d’envisager des améliorations méthodologiques ou d’élargir l’échantillon pour renforcer la validité des estimations, les résultats mettent en évidence deux principales limitations : premièrement, l’absence d’effets significatifs pourrait être due à des instruments faibles qui ne parviennent pas à capturer adéquatement les relations sous-jacentes ; deuxièmement, la forte incertitude des estimations (erreurs standards élevées) suggère des problèmes potentiels tels qu’une taille d’échantillon insuffisante, une grande variabilité des données ou une spécification incorrecte du modèle. Ces facteurs combinés remettent en question la fiabilité des conclusions obtenues.
+
+```{r, message = FALSE, warning = FALSE, echo = FALSE}
+test_ar1 <- mtest(model_gmm, order = 1)
+test_ar2 <- mtest(model_gmm, order = 2)
+
+# Convertir a data.frame
+mtest_df <- data.frame(
+  Test = c("AR(1)", "AR(2)"),
+  Statistic = c(test_ar1$statistic, test_ar2$statistic),
+  p_value = c(test_ar1$p.value, test_ar2$p.value)
+)
+
+# Mostrar con kable
+kable(mtest_df, format = "markdown", digits = 4, caption = "Test d'Arellano-Bond pour l'autocorrélation")
+```
+- Les tests d’Arellano-Bond permettent d’évaluer la validité du modèle GMM. Le test AR(1) donne une statistique de -1.6814 avec une *p-value* = 0.0927, indiquant une autocorrélation de premier ordre marginalement significative à 10 %, mais pas à 5 %. Cela suggère une légère corrélation sérielle des erreurs, fréquente dans les modèles dynamiques.
+
+- Le test AR(2), avec une statistique de -1.2517 et une *p-value* = 0.2107, ne montre pas d’autocorrélation de second ordre. Ce résultat renforce la validité des instruments et la cohérence du modèle GMM.
+
+### Discusion Finale
+1. **Rôle de l'endogénéité dans le modèle**  
+L’endogénéité, détectée via le test de Wu-Hausman (*p-value = 0.014*) dans le modèle à variables instrumentales (IV), confirme que la variable Taux_Directeur est corrélée avec le terme d’erreur.
+Le recours aux **variables instrumentales (IV)** et à la méthode **GMM** a permis de corriger ce biais, isolant l’effet causal des taux d’intérêt. Cependant, les résultats divergents entre les modèles IV (effet significatif) et GMM (effet non significatif) soulignent que l’endogénéité n’est pas le seul défi : la **spécification dynamique** (dans le GMM) et le choix des **instruments** jouent un rôle critique.  
+
+2. **Implications pour les futures recherches**    
+**a. Variables à inclure**  
+Les résultats montrent que ni le retard de profit (*lag(Profit, 1)*) ni le taux directeur (*Taux_Directeur*) n’expliquent de manière robuste les performances boursières dans le modèle GMM. Pour améliorer la puissance explicative, il serait pertinent d’inclure :  
+- **Variables macroéconomiques** :  
+  - **PIB** (pour capturer les cycles économiques),  
+  - **Inflation** (liée aux politiques monétaires),  
+  - **Taux de chômage** (effet sur la confiance des marchés).  
+- **Variables sectorielles** :  
+  - Rendements sectoriels (technologie, énergie),  
+  - Flux d’investissement étranger.  
+- **Variables géopolitiques** :  
+  - Indices de risque politique,  
+  - Prix des matières premières.  
+
+3. **Conclusion**  
+L’endogénéité est un défi central dans l’analyse des relations entre taux d’intérêt et marchés boursiers, comme le montre la nécessité d’utiliser des méthodes IV/GMM pour obtenir des estimations fiables. Cependant, les résultats mitigés entre modèles suggèrent que l’endogénéité n’est qu’une partie du problème : l’**absence de variables clés** et la **complexité des dynamiques temporelles** limitent l’explication des performances boursières.  
+- Modelo IV: Efecto negativo significativo de los tipos de interés.
+- Modelo GMM: No encuentra efectos significativos, pero sugiere problemas metodológicos (posiblemente por la dinámica del lag o instrumentos subóptimos).
+- Endogeneidad: Confirmada.
